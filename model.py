@@ -12,6 +12,7 @@ import pandas as pd
 from skimage import color
 from skimage import transform
 from skimage import io
+from skimage import img_as_ubyte
 
 
 DRIVING_LOG = pd.read_csv('udacity_data/driving_log.csv')
@@ -21,14 +22,20 @@ DRIVING_LOG.center_image = 'udacity_data/' + DRIVING_LOG.center_image
 
 N_TRAIN = len(DRIVING_LOG) * 8 // 10
 N_VALIDATION = len(DRIVING_LOG) - N_TRAIN
-IMAGE_SHAPE = (40, 80, 1)
+IMAGE_SHAPE = (40, 40, 1)
 BATCH_SIZE = 50
 
 
 def preprocessed(image):
-    gray = color.rgb2gray(image)
-    scaled = transform.resize(gray, IMAGE_SHAPE[:2])
-    norm = scaled - np.mean(scaled)
+
+
+    #cut = image[70:110, :]
+    cut = image[60:, :]
+    scaled = transform.resize(cut, (40, 40))
+    #return img_as_ubyte(scaled)
+
+    gray = color.rgb2gray(scaled)
+    norm = gray - np.mean(gray)
     return norm[:, :, None]
 
 

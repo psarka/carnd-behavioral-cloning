@@ -1,7 +1,7 @@
 import itertools
-import random
 
-from keras.layers import Convolution2D, Dropout
+from keras.layers import Convolution2D
+from keras.layers import Dropout
 from keras.layers import MaxPooling2D
 from keras.layers.core import Activation
 from keras.layers.core import Dense
@@ -9,45 +9,78 @@ from keras.layers.core import Flatten
 from keras.models import Sequential
 import numpy as np
 import pandas as pd
-from skimage import color
+from pathlib import Path
 from skimage import transform
 from skimage import io
-from skimage import img_as_ubyte
+from sklearn.utils import shuffle
+
+FWD_DATASETS = [
+    ('udacity_data', 0.99),  # normal driving data given by Udacity
+    ('driving_0', 0.99),  # normal driving data collected additionally
+    ('extra_turn_0', 0.01),  # extra data for the tricky corner
+    ('extra_turn_1', 0.99),  # extra data for the tricky corner (for validation)
+    # ('recovery_0', 1),  # data with snippets of recovery
+]
+
+SIDE_DATASETS = [
+    'udacity_data'  # normal driving data given by Udacity, left & right cameras
+]
 
 
-DRIVING_LOG = pd.read_csv('udacity_data/driving_log.csv')
-DRIVING_LOG = DRIVING_LOG.rename(columns={'center': 'center_image',
-                                          'steering': 'steering_angle'})
-DRIVING_LOG.center_image = 'udacity_data/' + DRIVING_LOG.center_image
+#
+# Data reading and streaming. Read the csv files, extract useful data and
+# split into training and validation parts.
+#
 
-N_TRAIN = len(DRIVING_LOG) * 8 // 10
-N_VALIDATION = len(DRIVING_LOG) - N_TRAIN
-IMAGE_SHAPE = (40, 40, 1)
+def train_collections():
+
+    for dataset, proportion in FWD_DATASETS:
+
+        log = pd.read_csv(dataset + '/driving_log.csv', header=None, skiprows=1)
+        paths = dataset + '/IMG/' + log[0].str.split('/').str[-1]
+        angles = log[3]
+
+        yield paths[:int(len(paths)*proportion)], angles[:int(len(angles)*proportion)]
+
+    for dataset in SIDE_DATASETS:
+
+        log = pd.read_csv(dataset + '/driving_log.csv', header=None, skiprows=1)
+        left_paths = dataset + '/IMG/' + log[1].str.split('/').str[-1]
+        right_paths = dataset + '/IMG/' + log[2].str.split('/').str[-1]
+        angles = log[3]
+
+        yield left_paths, angles + 0.3
+        yield right_paths, angles - 0.3
+
+
+def validation_collections():
+
+    for dataset, proportion in FWD_DATASETS:
+
+        log = pd.read_csv(dataset + '/driving_log.csv', header=None, skiprows=1)
+        paths = dataset + '/IMG/' + log[0].str.split('/').str[-1]
+        angles = log[3]
+
+        yield paths[int(len(paths)*proportion):], angles[int(len(angles)*proportion):]
+
+
+def flat(collection):
+    return [(path, angle) for paths_angles in collection for path, angle in zip(*paths_angles)]
+
+
+train_paths_angles = shuffle(flat(train_collections()))
+validation_paths_angles = flat(validation_collections())
+
+N_TRAIN = len(train_paths_angles)
+N_VALIDATION = len(validation_paths_angles)
 BATCH_SIZE = 50
 
 
-def preprocessed(image):
-
-
-    #cut = image[70:110, :]
-    cut = image[60:, :]
-    scaled = transform.resize(cut, (40, 40))
-    #return img_as_ubyte(scaled)
-
-    gray = color.rgb2gray(scaled)
-    norm = gray - np.mean(gray)
-    return norm[:, :, None]
-
-
-def training_stream():
-    training_indices = list(DRIVING_LOG.index[:N_TRAIN])
-    random.shuffle(training_indices)
-    yield from batched(infinite_stream(training_indices))
-
-
-def validation_stream():
-    validation_indices = list(DRIVING_LOG.index[N_TRAIN:])
-    yield from batched(infinite_stream(validation_indices))
+def image_angle_stream(paths_angles):
+    while True:
+        for image_path, angle in paths_angles:
+            if Path(image_path).exists():
+                yield io.imread(image_path), angle
 
 
 def batched(iterable):
@@ -58,18 +91,78 @@ def batched(iterable):
         yield np.stack(xs_ys[0]), np.stack(xs_ys[1])
 
 
-def infinite_stream(indices):
-    while True:
-        yield from finite_stream(indices)
+#
+# Preprocessing and augmentation
+#
 
 
-def finite_stream(indices):
-    for i in indices:
-        image_path = DRIVING_LOG.center_image[i]
-        image = io.imread(image_path)
-        steering_angle = DRIVING_LOG.steering_angle[i]
+IMAGE_SHAPE = (40, 40, 3)
 
-        yield preprocessed(image), steering_angle
+
+def preprocess(image):
+    cut = image[60:, :]
+    scaled = transform.resize(cut, (40, 40))
+
+    norm = scaled - np.mean(scaled)
+    norm /= np.std(norm)
+    return norm
+
+
+def preprocessed(image_angle_iterable):
+    for image, angle in image_angle_iterable:
+        yield preprocess(image), angle
+
+
+def shift(image, k):
+
+    if k > 0:
+        shifted = image[:, k:, :]
+        for i in range(k):
+            shifted = np.append(shifted, np.roll(shifted[:, -1:, :], 1, axis=0), axis=1)
+
+    else:
+        shifted = image[:, :k, :]
+        for i in range(-k):
+            shifted = np.append(np.roll(shifted[:, -1:, :], 1, axis=0), shifted, axis=1)
+
+    return shifted
+
+
+def augmented(image_angle_iterable):
+    for image, angle in image_angle_iterable:
+
+        fimage, fangle = np.fliplr(image), -angle
+
+        yield image, angle*2
+        yield fimage, fangle*2
+        # yield transform.rotate(image, 10, mode='wrap'), angle - 0.1
+        # yield transform.rotate(fimage, 10, mode='wrap'), fangle - 0.1
+        # yield transform.rotate(image, -10, mode='wrap'), angle + 0.1
+        # yield transform.rotate(fimage, -10, mode='wrap'), fangle + 0.1
+        # yield shift(image, 5), angle - 0.1
+        # yield shift(fimage, 5), fangle - 0.1
+        # yield shift(image, -5), angle + 0.1
+        # yield shift(fimage, -5), fangle + 0.1
+
+
+N_AUGMENTED = len(list(augmented([(np.zeros((20, 20, 3)), 0)])))
+
+
+#
+# Composed streams
+#
+
+def training_stream():
+    yield from batched(augmented(preprocessed(image_angle_stream(train_paths_angles))))
+
+
+def validation_stream():
+    yield from batched(preprocessed(image_angle_stream(validation_paths_angles)))
+
+
+#
+# Deep conv net
+#
 
 model = Sequential()
 
@@ -97,15 +190,15 @@ model.compile('adam', 'mean_squared_error')
 
 if __name__ == '__main__':
 
+    print(N_TRAIN)
+    print(N_AUGMENTED)
     model.fit_generator(training_stream(),
-                        samples_per_epoch=N_TRAIN,
+                        samples_per_epoch=N_TRAIN * N_AUGMENTED,
                         validation_data=validation_stream(),
                         nb_val_samples=N_VALIDATION,
-                        nb_epoch=5,
+                        nb_epoch=2,
                         )
 
-    model.save_weights('model1.h5')
-    print('weights saved to model1.h5')
+    model.save_weights('model.h5')
     with open('model1.json', 'w') as f:
         model = f.write(model.to_json())
-        print('model saved to model1.json')

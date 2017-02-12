@@ -17,7 +17,10 @@ I managed to get away with cutting 60 pixels of the top, and resizing the
 remaing part to 40x40 pixels. This way I could train the deep net without
 any troubles on my laptop GPU.
 
-![example of cut and resized image](preprocessed.png)
+Here are some examples of the original and preprocessed training images, 
+taken from the left, center and right cameras respectively.
+
+![examples of training images](data_examples.png)
 
 Augmentation
 ------------
@@ -28,6 +31,17 @@ corresponding angle modifications) did not work for me.
 An unexpected and insane trick, which helped me to finally get a version
 that passes the track, was to multiply the training angles by 2. It makes
 the car more "nervous" and hence more able to deal with sharp corners.
+
+Also, training angles of the images corresponding to left (right) cameras 
+were increased (decreased) by 0.3 degrees (value was found by trial and
+error).
+
+As a result of increasing (decreasing) by 0.3 and multiplying by 2, the
+training angles formed a rather aggressive trimodal distribution, with peaks
+near 0, and +- 0.6:
+
+![training angles](training_angles.png)
+
 
 Model
 =====
